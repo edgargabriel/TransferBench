@@ -69,6 +69,7 @@ typedef enum
   EXE_CPU          = 0, // CPU executor              (subExecutor = CPU thread)
   EXE_GPU_GFX      = 1, // GPU kernel-based executor (subExecutor = threadblock/CU)
   EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
+  EXE_GPU_ENG      = 3, // GPU SDMA-engine based executor (subExecutor = streams)
 } ExeType;
 
 bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE); }
@@ -77,8 +78,8 @@ bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
 
 char const MemTypeStr[7] = "CGBFUN";
-char const ExeTypeStr[4] = "CGD";
-char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
+char const ExeTypeStr[5] = "CGDE";
+char const ExeTypeName[4][4] = {"CPU", "GPU", "DMA", "ENG"};
 
 MemType inline CharToMemType(char const c)
 {
@@ -102,7 +103,7 @@ struct Transfer
 {
   // Inputs
   ExeType                    exeType;            // Transfer executor type
-  int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
+  int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU / engine ID for SDMA engine copy)
   int                        exeSubIndex;        // Executor subindex
   int                        numSubExecs;        // Number of subExecutors to use for this Transfer
   size_t                     numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)

@@ -1139,6 +1139,11 @@ void ParseExeType(EnvVars const& ev, std::string const& token,
       exit(1);
     }
   }
+  if (exeType == EXE_GPU_ENG && (exeIndex < 2 || exeIndex > 15))
+  {
+    printf("[ERROR] SDMA Engine index must be between 2 and {4 on MI250, 13 on MI300A, 15 on MI300X}\n");
+    exit(1);
+  }
 }
 
 // Helper function to parse a list of Transfer definitions
@@ -1225,7 +1230,7 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
       exit(1);
     }
 
-    if (transfer.exeType == EXE_GPU_DMA && (transfer.numSrcs > 1 || transfer.numDsts > 1))
+    if ((transfer.exeType == EXE_GPU_DMA || transfer.exeType == EXE_GPU_ENG) && (transfer.numSrcs > 1 || transfer.numDsts > 1))
     {
       printf("[ERROR] GPU DMA executor can only be used for single source / single dst Transfers\n");
       exit(1);
@@ -1413,6 +1418,13 @@ uint32_t GetId(uint32_t hwId)
   return (shId << 5) + (cuId << 2) + seId;
 }
 
+
+static inline hsa_amd_sdma_engine_id_t  MapIdToEngine(int id)
+{
+  return (hsa_amd_sdma_engine_id_t)(HSA_AMD_SDMA_ENGINE_0 << id);
+}
+
+
 void RunTransfer(EnvVars const& ev, int const iteration,
                  ExecutorInfo& exeInfo, int const transferIdx)
 {
@@ -1565,6 +1577,72 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       transfer->transferTime += delta;
       if (ev.showIterations)
         transfer->perIterationTime.push_back(delta);
+    }
+  }
+  else if (transfer->exeType == EXE_GPU_ENG)
+  {
+    hsa_amd_sdma_engine_id_t engIndex = MapIdToEngine(transfer->exeIndex);
+
+    hsa_status_t status;
+    hsa_amd_pointer_info_t info;
+    hsa_agent_t agents[2];
+    
+    info.size = sizeof(hsa_amd_pointer_info_t);
+    status = hsa_amd_pointer_info(transfer->dstMem[0], &info, NULL, NULL, NULL);
+    if (status != HSA_STATUS_SUCCESS) {
+        printf("get pointer info fail %p\n", transfer->dstMem[0]);
+        exit(1);
+    }
+    agents[0] = info.agentOwner;
+    
+    status = hsa_amd_pointer_info(transfer->srcMem[0], &info, NULL, NULL, NULL);
+    if (status != HSA_STATUS_SUCCESS) {
+        printf("get pointer info fail %p\n", transfer->srcMem[0]);
+        exit(1);
+    }
+    agents[1] = info.agentOwner;
+
+    status = hsa_amd_agents_allow_access(2, agents, NULL, transfer->dstMem[0]);
+    if (status != HSA_STATUS_SUCCESS) {
+      printf("failed to enable direct access for mem addr %p agent "
+	     "%lu\n\n", (void*)transfer->dstMem[0], agents[0].handle);
+      exit(1);
+    }
+
+    hsa_signal_t signal;
+    hsa_signal_create(1, 0, NULL, &signal);
+    if (status != HSA_STATUS_SUCCESS) {
+        printf("fail to create hsa signal\n");
+	exit(1);
+    }
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    hsa_signal_store_screlease(signal, 1);
+    status = hsa_amd_memory_async_copy_on_engine(transfer->dstMem[0], agents[0],
+						 transfer->srcMem[0], agents[1],
+						 transfer->numBytesActual, 0, NULL, signal,
+						 engIndex, false);
+    if (status != HSA_STATUS_SUCCESS) {
+        printf("error in hsa_amd_async_copy_on_engine error %d\n", status);
+	exit(1);
+    }
+    hsa_signal_value_t val = hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+						       HSA_WAIT_STATE_ACTIVE);
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+
+    // Record time if not a warmup iteration
+    if (iteration >= 0)
+    {
+      double const delta = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0);
+      transfer->transferTime += delta;
+      if (ev.showIterations)
+        transfer->perIterationTime.push_back(delta);
+    }
+
+    status = hsa_signal_destroy(signal);
+    if (status != HSA_STATUS_SUCCESS) {
+        printf("fail to destroy signal\n");
+	exit(1);
     }
   }
 }
